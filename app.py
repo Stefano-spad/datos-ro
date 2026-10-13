@@ -14,12 +14,17 @@ NOMBRE_CSV = "Datos_RO_corregido.csv"
 COL_GEN = "Fecha de Generación del Reclamo"
 COL_CIERRE = "Fecha de Cierre Reclamo"
 COL_ESTADO = "Estado del Reclamo"
+COL_TIPO = "Tipo de Reclamo"
 COL_MOTIVO = "Motivo del Reclamo"
 COL_SUCURSAL = "Sucursal Origen"
 COL_AGENTE = "Agente Asignado al Reclamo"
 COL_DIAS = "Días hasta Finalización"   # columna nueva (calculada)
 COL_TIEMPO = "Tiempo de cierre"        # columna nueva (calculada)
 MOTIVO_ROJO = "1-Exceso de Consumo o Monto Factura"
+
+# Colores y texturas fijos por Tipo de Reclamo (bien distintos entre sí)
+COLOR_TIPO = {"RO-Reclamo Comercial Web": "#1565C0", "RC-Reclamo": "#EF6C00"}
+TEXTURA_TIPO = {"RO-Reclamo Comercial Web": "", "RC-Reclamo": "x"}
 
 ORDEN_TIEMPO = ["Rápido", "Medio", "Lento", "Tardío", "Revisar fecha"]
 COLOR_TIEMPO = {
@@ -194,6 +199,9 @@ incluir_sin_cierre = st.sidebar.checkbox(
 )
 
 st.sidebar.markdown("**Categorías** (vacío = todas)")
+sel_tipo = st.sidebar.multiselect(
+    COL_TIPO, sorted(df[COL_TIPO].dropna().unique()), placeholder="Todos"
+)
 sel_motivo = st.sidebar.multiselect(COL_MOTIVO, motivos, placeholder="Todos")
 sel_sucursal = st.sidebar.multiselect(
     COL_SUCURSAL, sorted(df[COL_SUCURSAL].dropna().unique()), placeholder="Todas"
@@ -221,6 +229,8 @@ if incluir_sin_cierre:
 else:
     f = f[en_rango_cierre]
 
+if sel_tipo:
+    f = f[f[COL_TIPO].isin(sel_tipo)]
 if sel_motivo:
     f = f[f[COL_MOTIVO].isin(sel_motivo)]
 if sel_sucursal:
@@ -292,6 +302,55 @@ fig = px.bar(
 fig.update_traces(textposition="outside", cliponaxis=False)
 fig.update_layout(showlegend=False, yaxis=dict(categoryorder="total ascending", title=""))
 mostrar(fig)
+
+# --- Tipos de Reclamo: volumen y forma de cierre de cada tipo ---
+st.subheader("Tipos de Reclamo")
+tipos = [t for t in COLOR_TIPO if t in set(f[COL_TIPO])] + sorted(
+    t for t in f[COL_TIPO].dropna().unique() if t not in COLOR_TIPO)
+color_tipo = {t: COLOR_TIPO.get(t, PALETA[i % len(PALETA)]) for i, t in enumerate(tipos)}
+textura_tipo = {t: TEXTURA_TIPO.get(t, ".") for t in tipos}
+
+ct1, ct2 = st.columns(2)
+with ct1:
+    g_tipo = f[COL_TIPO].value_counts().reindex(tipos).reset_index()
+    g_tipo.columns = [COL_TIPO, "Reclamos"]
+    g_tipo["Etiqueta"] = g_tipo["Reclamos"].map(miles) + " (" + g_tipo["Reclamos"].map(lambda v: pct(v, total)) + ")"
+    fig = px.bar(
+        g_tipo, x=COL_TIPO, y="Reclamos", text="Etiqueta",
+        color=COL_TIPO, color_discrete_map=color_tipo,
+        pattern_shape=COL_TIPO, pattern_shape_map=textura_tipo,
+        title="Cantidad de reclamos por Tipo",
+    )
+    fig.update_traces(textposition="outside", cliponaxis=False, textfont_size=15)
+    fig.update_layout(showlegend=False, xaxis_title="", bargap=0.45)
+    mostrar(fig)
+
+with ct2:
+    # Cada tipo al 100 %: así se compara cómo cierra cada uno aunque tengan volúmenes muy distintos
+    base_t = f[f[COL_TIEMPO].isin(ORDEN_TIEMPO)]
+    g_tt = (base_t.groupby([COL_TIPO, COL_TIEMPO]).size()
+            .reset_index(name="Reclamos"))
+    if not g_tt.empty:
+        g_tt["%"] = g_tt["Reclamos"] / g_tt.groupby(COL_TIPO)["Reclamos"].transform("sum") * 100
+        g_tt["Texto"] = g_tt["%"].map(lambda v: f"{v:.0f}%" if v >= 7 else "")
+        fig = px.bar(
+            g_tt, y=COL_TIPO, x="%", color=COL_TIEMPO, orientation="h", text="Texto",
+            color_discrete_map=COLOR_TIEMPO,
+            category_orders={COL_TIEMPO: ORDEN_TIEMPO, COL_TIPO: tipos},
+            custom_data=["Reclamos"],
+            title="Tiempo de cierre dentro de cada Tipo (100% = total del tipo)",
+        )
+        fig.update_traces(
+            textposition="inside", insidetextanchor="middle", textangle=0,
+            hovertemplate="%{y}<br>%{fullData.name}: %{x:.1f}% (%{customdata[0]} reclamos)<extra></extra>",
+        )
+        fig.update_layout(
+            barmode="stack", xaxis=dict(range=[0, 100], title="% de los reclamos del tipo", ticksuffix="%"),
+            yaxis_title="", legend=dict(orientation="h", y=-0.25, title=""),
+        )
+        mostrar(fig)
+    else:
+        st.info("No hay reclamos cerrados con esos filtros para comparar el tiempo de cierre.")
 
 col1, col2 = st.columns(2)
 
@@ -422,6 +481,18 @@ if len(vm) > 1:
         f"<b>Motivo principal:</b> «{vm.index[0]}» concentra el {pct(vm.iloc[0], total)} "
         f"de los reclamos ({miles(vm.iloc[0])} de {miles(total)})."
     )
+
+# Comparación entre Tipos de Reclamo
+vt = f[COL_TIPO].value_counts()
+if len(vt) > 1:
+    partes = []
+    for t in vt.index:
+        dt = f[(f[COL_TIPO] == t) & (f[COL_DIAS] >= 0)][COL_DIAS]
+        txt_t = f"«{t}» {miles(vt[t])} ({pct(vt[t], total)})"
+        if len(dt):
+            txt_t += f", cierra en {dec(dt.mean())} días en promedio"
+        partes.append(txt_t)
+    ins.append("<b>Tipos de Reclamo:</b> " + "; ".join(partes) + ".")
 
 # Concentración por sucursal
 vs = f[COL_SUCURSAL].value_counts()
